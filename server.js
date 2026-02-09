@@ -27,7 +27,15 @@ app.get("/health", async (req, res) => {
     const [rows] = await pool.query("SELECT 1 AS ok");
     res.json({ status: "ok", db: rows[0].ok });
   } catch (e) {
-    res.status(500).json({ status: "error", message: e.message });
+    console.error("HEALTH ERROR:", e); // Railway logs-da tam görünsün
+    res.status(500).json({
+      status: "error",
+      name: e?.name || null,
+      code: e?.code || null,
+      errno: e?.errno || null,
+      message: e?.message || null,
+      sqlState: e?.sqlState || null,
+    });
   }
 });
 
