@@ -7,6 +7,8 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 
+console.log("SERVER VERSION: test-analyze route included ✅");
+
 const app = express();
 
 /** ✅ CORS (Webflow domenlərini yazmaq daha yaxşıdır)
