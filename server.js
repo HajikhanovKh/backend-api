@@ -120,11 +120,15 @@ app.post("/analyze-vision", async (req, res) => {
     const { pdfUrl } = req.body || {};
     if (!pdfUrl) return res.status(400).json({ error: "pdfUrl is required" });
 
+    // PDF-i serverdən çəkirik
+    const buf = await fetchPdfBuffer(pdfUrl);
+    const b64 = buf.toString("base64");
+
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       temperature: 0,
 
-      // ✅ Structured Outputs (JSON Schema)
+      // ✅ JSON-u məcbur edirik (schema)
       text: {
         format: {
           type: "json_schema",
@@ -155,35 +159,28 @@ app.post("/analyze-vision", async (req, res) => {
                 "CMR-də olan tərəfləri götür:\n" +
                 "- Exporter = Consignor / Sender\n" +
                 "- Importer = Consignee\n" +
-                "Adları sənəddə necə yazılıbsa elə yaz (şirkət adı, şəhər/ölkə varsa saxla).\n" +
+                "Adları sənəddə necə yazılıbsa elə yaz.\n" +
                 "Tapmasan boş string qaytar."
             },
             {
               type: "input_file",
-              filename: "document.pdf",
-              file_url: pdfUrl
+              // ✅ DÜZGÜN format: data URL
+              file_data: `data:application/pdf;base64,${b64}`
             }
           ]
         }
       ]
     });
 
-    // 🔎 Debug üçün: model nə qaytardı?
-    const outText = response.output_text || "";
-    // outText JSON olmalıdır (schema ilə)
+    const outText = response.output_text || "{}";
+
     let out = { exporter: "", importer: "" };
-    try { out = JSON.parse(outText); } catch {}
+    try { out = JSON.parse(outText); } catch { out = { exporter: "", importer: "", raw: outText }; }
 
-    return res.json({
-      exporter: out.exporter || "",
-      importer: out.importer || "",
-      // ❗ debug üçün saxla (sonra silərsən)
-      raw: outText
-    });
-
+    res.json({ exporter: out.exporter || "", importer: out.importer || "" });
   } catch (e) {
     console.error("ANALYZE VISION ERROR:", e);
-    return res.status(500).json({ error: e?.message || "analyze_error" });
+    res.status(500).json({ error: e?.message || "analyze_error" });
   }
 });
 
