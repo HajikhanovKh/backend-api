@@ -6,7 +6,7 @@ import "dotenv/config";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 import pdf from "pdf-parse";
 
 console.log("SERVER VERSION: upload + analyze-vision ✅");
