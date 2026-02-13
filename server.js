@@ -115,7 +115,7 @@ async function fetchPdfBase64(pdfUrl) {
 // =========================
 // ✅ Analyze (Vision) — TÖVSİYƏ OLUNAN
 // =========================
-import OpenAI, { toFile } from "openai"; // yuxarıdakı importu belə saxla
+
 
 // ...
 
