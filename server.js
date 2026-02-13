@@ -138,10 +138,10 @@ app.post("/analyze-vision", async (req, res) => {
                 "Şirkət adlarını mümkün qədər dəqiq yaz, artıq boşluqları düzəlt."
             },
             {
-              type: "input_file",
-              filename: "document.pdf",
-              file_data: b64
+            type: "input_file",
+            file_url: pdfUrl
             }
+
           ]
         }
       ]
