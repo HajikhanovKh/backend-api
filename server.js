@@ -120,52 +120,32 @@ app.post("/analyze-vision", async (req, res) => {
     const { pdfUrl } = req.body || {};
     if (!pdfUrl) return res.status(400).json({ error: "pdfUrl is required" });
 
-    // PDF-i serverdən çəkirik
+    // PDF-i serverdən çək
     const buf = await fetchPdfBuffer(pdfUrl);
     const b64 = buf.toString("base64");
 
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       temperature: 0,
-
-      // ✅ JSON-u məcbur edirik (schema)
-      text: {
-        format: {
-          type: "json_schema",
-          strict: true,
-          schema: {
-            name: "cmr_invoice_parties",
-            schema: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                exporter: { type: "string" },
-                importer: { type: "string" }
-              },
-              required: ["exporter", "importer"]
-            }
-          }
-        }
-      },
-
       input: [
         {
           role: "user",
           content: [
+            // ✅ 1) əvvəl FILE (docs nümunəsinə uyğun)
+            {
+              type: "input_file",
+              filename: "document.pdf",
+              file_data: b64
+            },
+            // ✅ 2) sonra TEXT
             {
               type: "input_text",
               text:
-                "Bu PDF-də 1-ci səhifə CMR, 2-ci səhifə Invoice-dir.\n" +
-                "CMR-də olan tərəfləri götür:\n" +
-                "- Exporter = Consignor / Sender\n" +
-                "- Importer = Consignee\n" +
-                "Adları sənəddə necə yazılıbsa elə yaz.\n" +
-                "Tapmasan boş string qaytar."
-            },
-            {
-              type: "input_file",
-              // ✅ DÜZGÜN format: data URL
-              file_data: `data:application/pdf;base64,${b64}`
+                'Bu PDF-də 1-ci səhifə CMR, 2-ci səhifə Invoice-dir. ' +
+                'CMR-də olan tərəfləri çıxar: ' +
+                'Exporter = Consignor/Sender, Importer = Consignee. ' +
+                'Yalnız JSON qaytar: {"exporter":"","importer":""}. ' +
+                'Adları sənəddə necə yazılıbsa elə yaz, artıq boşluqları düzəlt.'
             }
           ]
         }
@@ -175,12 +155,17 @@ app.post("/analyze-vision", async (req, res) => {
     const outText = response.output_text || "{}";
 
     let out = { exporter: "", importer: "" };
-    try { out = JSON.parse(outText); } catch { out = { exporter: "", importer: "", raw: outText }; }
+    try { out = JSON.parse(outText); }
+    catch { out = { exporter: "", importer: "", raw: outText }; }
 
-    res.json({ exporter: out.exporter || "", importer: out.importer || "" });
+    return res.json({
+      exporter: out.exporter || "",
+      importer: out.importer || ""
+    });
+
   } catch (e) {
     console.error("ANALYZE VISION ERROR:", e);
-    res.status(500).json({ error: e?.message || "analyze_error" });
+    return res.status(500).json({ error: e?.message || "analyze_error" });
   }
 });
 
