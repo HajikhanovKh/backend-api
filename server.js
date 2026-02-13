@@ -124,40 +124,33 @@ app.post("/analyze-vision", async (req, res) => {
     const { pdfUrl } = req.body || {};
     if (!pdfUrl) return res.status(400).json({ error: "pdfUrl is required" });
 
-    // 1) PDF-i çək
     const buf = await fetchPdfBuffer(pdfUrl);
 
-    // 2) OpenAI Files-ə yüklə
     const file = await openai.files.create({
       file: await toFile(buf, "document.pdf"),
       purpose: "user_data",
     });
 
-    // 3) Vision analiz + JSON schema (məcburi)
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       temperature: 0,
 
-      // ✅ məcburi JSON format
+      // ✅ DÜZGÜN: name buradadır
       text: {
         format: {
           type: "json_schema",
+          name: "parties",
           strict: true,
           schema: {
-            name: "parties",
-            schema: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                exporter: { type: "string" },
-                importer: { type: "string" },
-
-                // debug üçün: model haradan götürdü
-                exporter_source: { type: "string" },
-                importer_source: { type: "string" }
-              },
-              required: ["exporter", "importer", "exporter_source", "importer_source"]
-            }
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              exporter: { type: "string" },
+              importer: { type: "string" },
+              exporter_source: { type: "string" },
+              importer_source: { type: "string" }
+            },
+            required: ["exporter", "importer", "exporter_source", "importer_source"]
           }
         }
       },
@@ -171,7 +164,7 @@ app.post("/analyze-vision", async (req, res) => {
               type: "input_text",
               text:
                 "Bu PDF 2 səhifədir: 1-ci səhifə CMR, 2-ci səhifə Invoice.\n" +
-                "Mənə yalnız CMR (1-ci səhifə) üzrə tərəfləri çıxar:\n" +
+                "Yalnız CMR (1-ci səhifə) üzrə çıxar:\n" +
                 "- Exporter = CONSIGNOR / SENDER (box 1)\n" +
                 "- Importer = CONSIGNEE (box 2)\n" +
                 "Adları sənəddə necə yazılıbsa elə yaz.\n" +
@@ -180,8 +173,27 @@ app.post("/analyze-vision", async (req, res) => {
             }
           ]
         }
-      ],
+      ]
     });
+
+    const outText = response.output_text || "{}";
+    let out = {
+      exporter: "",
+      importer: "",
+      exporter_source: "",
+      importer_source: ""
+    };
+    try { out = JSON.parse(outText); } catch {}
+
+    // İstəsən sonradan sil:
+    // await openai.files.delete(file.id);
+
+    return res.json(out);
+  } catch (e) {
+    console.error("ANALYZE VISION ERROR:", e);
+    return res.status(500).json({ error: e?.message || "analyze_error" });
+  }
+});
 
     const outText = response.output_text || "{}";
 
