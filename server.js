@@ -1,15 +1,91 @@
+// server.js (ESM)
 import express from "express";
 import cors from "cors";
 import mysql from "mysql2/promise";
 import "dotenv/config";
+import multer from "multer";
+import path from "path";
+import fs from "fs";
 
 const app = express();
 
-// Webflow üçün rahat: CORS açıq
-app.use(cors());
+/** ✅ CORS (Webflow domenlərini yazmaq daha yaxşıdır)
+ *  Əgər domenlərini bilmirsənsə, müvəqqəti app.use(cors()) saxla.
+ */
+app.use(
+  cors({
+    origin: [
+      "https://avtomobil-ile-dasinan-mal.webflow.io",
+      "https://avtomobil-ile-dasinan-mal.com",
+    ],
+  })
+);
+// Əgər yuxarı origin siyahısı problem yaratsa, bunu istifadə et:
+// app.use(cors());
+
 app.use(express.json());
 
-// MySQL connection pool (Railway variables)
+// =========================
+// ✅ Upload (PDF) hissəsi
+// =========================
+const uploadDir = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+
+// yüklənən faylları URL ilə açmaq üçün
+app.use("/uploads", express.static(uploadDir));
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+    cb(null, Date.now() + "_" + safe);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === "application/pdf") cb(null, true);
+    else cb(new Error("Only PDF allowed"));
+  },
+});
+
+// Webflow buraya multipart/form-data ilə "file" göndərəcək
+app.post("/upload", upload.single("file"), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "file is required" });
+
+    // Railway reverse proxy üçün https düzgün çıxsın deyə:
+    const proto = req.headers["x-forwarded-proto"] || req.protocol;
+    const host = req.get("host");
+    const url = `${proto}://${host}/uploads/${req.file.filename}`;
+
+    return res.json({ url });
+  } catch (e) {
+    console.error("UPLOAD ERROR:", e);
+    return res.status(500).json({ error: e?.message || "upload_error" });
+  }
+});
+
+// multer/fileFilter errorlarını JSON qaytarmaq üçün
+app.use((err, req, res, next) => {
+  if (err?.message === "Only PDF allowed") {
+    return res.status(400).json({ error: "only_pdf_allowed" });
+  }
+  if (err?.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({ error: "file_too_large" });
+  }
+  if (err) {
+    console.error("MIDDLEWARE ERROR:", err);
+    return res.status(500).json({ error: err.message || "server_error" });
+  }
+  next();
+});
+
+// =========================
+// ✅ MySQL connection pool
+// =========================
 const pool = mysql.createPool({
   host: process.env.MYSQLHOST,
   port: Number(process.env.MYSQLPORT || 3306),
@@ -27,7 +103,7 @@ app.get("/health", async (req, res) => {
     const [rows] = await pool.query("SELECT 1 AS ok");
     res.json({ status: "ok", db: rows[0].ok });
   } catch (e) {
-    console.error("HEALTH ERROR:", e); // Railway logs-da tam görünsün
+    console.error("HEALTH ERROR:", e);
     res.status(500).json({
       status: "error",
       name: e?.name || null,
@@ -44,9 +120,7 @@ app.get("/health", async (req, res) => {
 app.get("/nv/search", async (req, res) => {
   try {
     const reg = (req.query.reg_code || "").trim();
-    if (!reg) {
-      return res.status(400).json({ error: "reg_code is required" });
-    }
+    if (!reg) return res.status(400).json({ error: "reg_code is required" });
 
     const [rows] = await pool.query(
       `SELECT
@@ -62,13 +136,12 @@ app.get("/nv/search", async (req, res) => {
       [reg]
     );
 
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "not found" });
-    }
+    if (rows.length === 0) return res.status(404).json({ error: "not found" });
 
     res.json(rows[0]);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error("NV SEARCH ERROR:", e);
+    res.status(500).json({ error: e?.message || "server_error" });
   }
 });
 
@@ -82,7 +155,8 @@ app.get("/nv", async (req, res) => {
     );
     res.json(rows);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error("NV LIST ERROR:", e);
+    res.status(500).json({ error: e?.message || "server_error" });
   }
 });
 
@@ -94,7 +168,8 @@ app.get("/nv/latest", async (req, res) => {
     );
     res.json(rows[0] || {});
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error("NV LATEST ERROR:", e);
+    res.status(500).json({ error: e?.message || "server_error" });
   }
 });
 
