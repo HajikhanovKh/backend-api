@@ -25,6 +25,35 @@ app.use(
 
 app.use(express.json());
 
+// 1) Simple test page: buradan analyze-simple çağıracağıq
+app.get("/test-analyze", (req, res) => {
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.end(`
+    <h2>Analyze test</h2>
+    <p>PDF URL:</p>
+    <input id="u" style="width:700px" placeholder="PDF URL yapışdır">
+    <button id="b">Analyze</button>
+    <pre id="o" style="background:#111;color:#0f0;padding:12px;white-space:pre-wrap"></pre>
+
+    <script>
+      document.getElementById('b').onclick = async () => {
+        const pdfUrl = document.getElementById('u').value.trim();
+        if(!pdfUrl) return alert('PDF URL daxil et');
+
+        const r = await fetch('/analyze-simple', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ pdfUrl })
+        });
+
+        const t = await r.text();
+        document.getElementById('o').textContent = 'Status: ' + r.status + '\\n' + t;
+      };
+    </script>
+  `);
+});
+
+
 // =========================
 // ✅ Upload (PDF) hissəsi
 // =========================
