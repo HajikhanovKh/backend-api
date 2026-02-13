@@ -115,6 +115,10 @@ async function fetchPdfBase64(pdfUrl) {
 // =========================
 // ✅ Analyze (Vision) — TÖVSİYƏ OLUNAN
 // =========================
+import OpenAI, { toFile } from "openai"; // yuxarıdakı importu belə saxla
+
+// ...
+
 app.post("/analyze-vision", async (req, res) => {
   try {
     const { pdfUrl } = req.body || {};
@@ -123,16 +127,41 @@ app.post("/analyze-vision", async (req, res) => {
     // 1) PDF-i çək
     const buf = await fetchPdfBuffer(pdfUrl);
 
-    // 2) OpenAI Files API-yə yüklə (tövsiyə: user_data)
+    // 2) OpenAI Files-ə yüklə
     const file = await openai.files.create({
       file: await toFile(buf, "document.pdf"),
       purpose: "user_data",
     });
 
-    // 3) Responses API: file_id ilə analiz
+    // 3) Vision analiz + JSON schema (məcburi)
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       temperature: 0,
+
+      // ✅ məcburi JSON format
+      text: {
+        format: {
+          type: "json_schema",
+          strict: true,
+          schema: {
+            name: "parties",
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                exporter: { type: "string" },
+                importer: { type: "string" },
+
+                // debug üçün: model haradan götürdü
+                exporter_source: { type: "string" },
+                importer_source: { type: "string" }
+              },
+              required: ["exporter", "importer", "exporter_source", "importer_source"]
+            }
+          }
+        }
+      },
+
       input: [
         {
           role: "user",
@@ -141,31 +170,36 @@ app.post("/analyze-vision", async (req, res) => {
             {
               type: "input_text",
               text:
-                'Bu PDF-də 1-ci səhifə CMR, 2-ci səhifə Invoice-dir. ' +
-                'CMR üzrə çıxar: Exporter = Consignor/Sender, Importer = Consignee. ' +
-                'Yalnız JSON qaytar: {"exporter":"","importer":""}.',
-            },
-          ],
-        },
+                "Bu PDF 2 səhifədir: 1-ci səhifə CMR, 2-ci səhifə Invoice.\n" +
+                "Mənə yalnız CMR (1-ci səhifə) üzrə tərəfləri çıxar:\n" +
+                "- Exporter = CONSIGNOR / SENDER (box 1)\n" +
+                "- Importer = CONSIGNEE (box 2)\n" +
+                "Adları sənəddə necə yazılıbsa elə yaz.\n" +
+                "exporter_source və importer_source sahələrinə sənəddən həmin sətiri qısa şəkildə kopyala (maks 120 simvol).\n" +
+                "Tapılmasa boş string qaytar."
+            }
+          ]
+        }
       ],
     });
 
     const outText = response.output_text || "{}";
-    let out = { exporter: "", importer: "" };
-    try { out = JSON.parse(outText); } catch {}
 
-    // (istəsən) upload olunan faylı silə bilərsən, amma məcburi deyil
+    let out;
+    try { out = JSON.parse(outText); }
+    catch { out = { exporter: "", importer: "", exporter_source: "", importer_source: "" }; }
+
+    // istəyirsənsə, faylı sonra sil (xərcləri/qarışıqlığı azaldır)
     // await openai.files.delete(file.id);
 
-    return res.json({
-      exporter: out.exporter || "",
-      importer: out.importer || "",
-    });
+    return res.json(out);
+
   } catch (e) {
     console.error("ANALYZE VISION ERROR:", e);
     return res.status(500).json({ error: e?.message || "analyze_error" });
   }
 });
+
 
 
 // =========================
