@@ -120,10 +120,16 @@ app.post("/analyze-vision", async (req, res) => {
     const { pdfUrl } = req.body || {};
     if (!pdfUrl) return res.status(400).json({ error: "pdfUrl is required" });
 
-    // PDF-i serverdən çək
+    // 1) PDF-i çək
     const buf = await fetchPdfBuffer(pdfUrl);
-    const b64 = buf.toString("base64");
 
+    // 2) OpenAI Files API-yə yüklə (tövsiyə: user_data)
+    const file = await openai.files.create({
+      file: await toFile(buf, "document.pdf"),
+      purpose: "user_data",
+    });
+
+    // 3) Responses API: file_id ilə analiz
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       temperature: 0,
@@ -131,38 +137,30 @@ app.post("/analyze-vision", async (req, res) => {
         {
           role: "user",
           content: [
-            // ✅ 1) əvvəl FILE (docs nümunəsinə uyğun)
-            {
-              type: "input_file",
-              filename: "document.pdf",
-              file_data: b64
-            },
-            // ✅ 2) sonra TEXT
+            { type: "input_file", file_id: file.id },
             {
               type: "input_text",
               text:
                 'Bu PDF-də 1-ci səhifə CMR, 2-ci səhifə Invoice-dir. ' +
-                'CMR-də olan tərəfləri çıxar: ' +
-                'Exporter = Consignor/Sender, Importer = Consignee. ' +
-                'Yalnız JSON qaytar: {"exporter":"","importer":""}. ' +
-                'Adları sənəddə necə yazılıbsa elə yaz, artıq boşluqları düzəlt.'
-            }
-          ]
-        }
-      ]
+                'CMR üzrə çıxar: Exporter = Consignor/Sender, Importer = Consignee. ' +
+                'Yalnız JSON qaytar: {"exporter":"","importer":""}.',
+            },
+          ],
+        },
+      ],
     });
 
     const outText = response.output_text || "{}";
-
     let out = { exporter: "", importer: "" };
-    try { out = JSON.parse(outText); }
-    catch { out = { exporter: "", importer: "", raw: outText }; }
+    try { out = JSON.parse(outText); } catch {}
+
+    // (istəsən) upload olunan faylı silə bilərsən, amma məcburi deyil
+    // await openai.files.delete(file.id);
 
     return res.json({
       exporter: out.exporter || "",
-      importer: out.importer || ""
+      importer: out.importer || "",
     });
-
   } catch (e) {
     console.error("ANALYZE VISION ERROR:", e);
     return res.status(500).json({ error: e?.message || "analyze_error" });
