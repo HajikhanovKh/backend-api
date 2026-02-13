@@ -120,11 +120,30 @@ app.post("/analyze-vision", async (req, res) => {
     const { pdfUrl } = req.body || {};
     if (!pdfUrl) return res.status(400).json({ error: "pdfUrl is required" });
 
-    const b64 = await fetchPdfBase64(pdfUrl);
-
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       temperature: 0,
+
+      // ✅ Structured Outputs (JSON Schema)
+      text: {
+        format: {
+          type: "json_schema",
+          strict: true,
+          schema: {
+            name: "cmr_invoice_parties",
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                exporter: { type: "string" },
+                importer: { type: "string" }
+              },
+              required: ["exporter", "importer"]
+            }
+          }
+        }
+      },
+
       input: [
         {
           role: "user",
@@ -132,34 +151,39 @@ app.post("/analyze-vision", async (req, res) => {
             {
               type: "input_text",
               text:
-                'Bu PDF-də 1-ci səhifə CMR, 2-ci səhifə Invoice-dir. ' +
-                'Exporter (göndərən/satıcı) və Importer (alan/consignee) adlarını çıxar. ' +
-                'Yalnız JSON qaytar: {"exporter":"","importer":""}. ' +
-                "Şirkət adlarını mümkün qədər dəqiq yaz, artıq boşluqları düzəlt."
+                "Bu PDF-də 1-ci səhifə CMR, 2-ci səhifə Invoice-dir.\n" +
+                "CMR-də olan tərəfləri götür:\n" +
+                "- Exporter = Consignor / Sender\n" +
+                "- Importer = Consignee\n" +
+                "Adları sənəddə necə yazılıbsa elə yaz (şirkət adı, şəhər/ölkə varsa saxla).\n" +
+                "Tapmasan boş string qaytar."
             },
             {
-            type: "input_file",
-            file_url: pdfUrl
+              type: "input_file",
+              filename: "document.pdf",
+              file_url: pdfUrl
             }
-
           ]
         }
       ]
     });
 
-    const outText = response.output_text || "{}";
-
+    // 🔎 Debug üçün: model nə qaytardı?
+    const outText = response.output_text || "";
+    // outText JSON olmalıdır (schema ilə)
     let out = { exporter: "", importer: "" };
-    try { out = JSON.parse(outText); }
-    catch { out = { exporter: "", importer: "", raw: outText }; }
+    try { out = JSON.parse(outText); } catch {}
 
-    res.json({
+    return res.json({
       exporter: out.exporter || "",
-      importer: out.importer || ""
+      importer: out.importer || "",
+      // ❗ debug üçün saxla (sonra silərsən)
+      raw: outText
     });
+
   } catch (e) {
     console.error("ANALYZE VISION ERROR:", e);
-    res.status(500).json({ error: e?.message || "analyze_error" });
+    return res.status(500).json({ error: e?.message || "analyze_error" });
   }
 });
 
