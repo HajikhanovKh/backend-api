@@ -9,14 +9,11 @@ import fs from "fs";
 import OpenAI from "openai";
 import pdf from "pdf-parse";
 
-
-console.log("SERVER VERSION: test-analyze route included ✅");
+console.log("SERVER VERSION: upload + analyze-vision ✅");
 
 const app = express();
 
-/** ✅ CORS (Webflow domenlərini yazmaq daha yaxşıdır)
- *  Əgər domenlərini bilmirsənsə, müvəqqəti app.use(cors()) saxla.
- */
+/** ✅ CORS */
 app.use(
   cors({
     origin: [
@@ -25,39 +22,9 @@ app.use(
     ],
   })
 );
-// Əgər yuxarı origin siyahısı problem yaratsa, bunu istifadə et:
-// app.use(cors());
+// Alternativ (test üçün): app.use(cors());
 
 app.use(express.json());
-
-// 1) Simple test page: buradan analyze-simple çağıracağıq
-app.get("/test-analyze", (req, res) => {
-  res.setHeader("content-type", "text/html; charset=utf-8");
-  res.end(`
-    <h2>Analyze test</h2>
-    <p>PDF URL:</p>
-    <input id="u" style="width:700px" placeholder="PDF URL yapışdır">
-    <button id="b">Analyze</button>
-    <pre id="o" style="background:#111;color:#0f0;padding:12px;white-space:pre-wrap"></pre>
-
-    <script>
-      document.getElementById('b').onclick = async () => {
-        const pdfUrl = document.getElementById('u').value.trim();
-        if(!pdfUrl) return alert('PDF URL daxil et');
-
-        const r = await fetch('/analyze-simple', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ pdfUrl })
-        });
-
-        const t = await r.text();
-        document.getElementById('o').textContent = 'Status: ' + r.status + '\\n' + t;
-      };
-    </script>
-  `);
-});
-
 
 // =========================
 // ✅ Upload (PDF) hissəsi
@@ -90,7 +57,6 @@ app.post("/upload", upload.single("file"), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "file is required" });
 
-    // Railway reverse proxy üçün https düzgün çıxsın deyə:
     const proto = req.headers["x-forwarded-proto"] || req.protocol;
     const host = req.get("host");
     const url = `${proto}://${host}/uploads/${req.file.filename}`;
@@ -118,103 +84,91 @@ app.use((err, req, res, next) => {
 });
 
 // =========================
-// ✅ MySQL connection pool
+// ✅ OpenAI
 // =========================
-const pool = mysql.createPool({
-  host: process.env.MYSQLHOST,
-  port: Number(process.env.MYSQLPORT || 3306),
-  user: process.env.MYSQLUSER,
-  password: process.env.MYSQLPASSWORD,
-  database: process.env.MYSQLDATABASE,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-});
-
-// 1) Sağlamlıq testi (DB qoşulubmu?)
-app.get("/health", async (req, res) => {
-  try {
-    const [rows] = await pool.query("SELECT 1 AS ok");
-    res.json({ status: "ok", db: rows[0].ok });
-  } catch (e) {
-    console.error("HEALTH ERROR:", e);
-    res.status(500).json({
-      status: "error",
-      name: e?.name || null,
-      code: e?.code || null,
-      errno: e?.errno || null,
-      message: e?.message || null,
-      sqlState: e?.sqlState || null,
-    });
-  }
-});
-
-// 2) NV search: nv_reg_code ilə tap
-// istifadə: /nv/search?reg_code=00500 (və ya 10020030000001)
-app.get("/nv/search", async (req, res) => {
-  try {
-    const reg = (req.query.reg_code || "").trim();
-    if (!reg) return res.status(400).json({ error: "reg_code is required" });
-
-    const [rows] = await pool.query(
-      `SELECT
-         id,
-         nv_reg_code,
-         nv_number,
-         nv_marka,
-         nv_type,
-         nv_country
-       FROM nv_info
-       WHERE nv_reg_code = ?
-       LIMIT 1`,
-      [reg]
-    );
-
-    if (rows.length === 0) return res.status(404).json({ error: "not found" });
-
-    res.json(rows[0]);
-  } catch (e) {
-    console.error("NV SEARCH ERROR:", e);
-    res.status(500).json({ error: e?.message || "server_error" });
-  }
-});
-
-// 3) (Opsional) hamısını qaytarır
-app.get("/nv", async (req, res) => {
-  try {
-    const limit = Math.min(Number(req.query.limit || 100), 500);
-    const [rows] = await pool.query(
-      "SELECT id, nv_reg_code, nv_number, nv_marka, nv_type, nv_country FROM nv_info ORDER BY id DESC LIMIT ?",
-      [limit]
-    );
-    res.json(rows);
-  } catch (e) {
-    console.error("NV LIST ERROR:", e);
-    res.status(500).json({ error: e?.message || "server_error" });
-  }
-});
-
-// 4) (Opsional) ən son yazılan qeyd
-app.get("/nv/latest", async (req, res) => {
-  try {
-    const [rows] = await pool.query(
-      "SELECT id, nv_reg_code, nv_number, nv_marka, nv_type, nv_country FROM nv_info ORDER BY id DESC LIMIT 1"
-    );
-    res.json(rows[0] || {});
-  } catch (e) {
-    console.error("NV LATEST ERROR:", e);
-    res.status(500).json({ error: e?.message || "server_error" });
-  }
-});
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-async function fetchPdfBuffer(pdfUrl){
-  const r = await fetch(pdfUrl);
-  if (!r.ok) throw new Error("pdf_fetch_failed");
+async function fetchPdfBuffer(pdfUrl) {
+  const r = await fetch(pdfUrl, {
+    method: "GET",
+    headers: { Accept: "application/pdf,*/*" },
+  });
+
+  if (!r.ok) {
+    const ct = r.headers.get("content-type");
+    const body = await r.text().catch(() => "");
+    throw new Error(
+      `pdf_fetch_failed status=${r.status} contentType=${ct} body=${body.slice(0, 200)}`
+    );
+  }
+
   const arr = await r.arrayBuffer();
   return Buffer.from(arr);
 }
 
+// ✅ Vision üçün base64
+async function fetchPdfBase64(pdfUrl) {
+  const buf = await fetchPdfBuffer(pdfUrl);
+  return buf.toString("base64");
+}
+
+// =========================
+// ✅ Analyze (Vision) — TÖVSİYƏ OLUNAN
+// =========================
+app.post("/analyze-vision", async (req, res) => {
+  try {
+    const { pdfUrl } = req.body || {};
+    if (!pdfUrl) return res.status(400).json({ error: "pdfUrl is required" });
+
+    const b64 = await fetchPdfBase64(pdfUrl);
+
+    // OpenAI Responses API: PDF input_file kimi göndəririk
+    const response = await openai.responses.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text:
+                'Bu PDF-də 1-ci səhifə CMR, 2-ci səhifə Invoice-dir. ' +
+                'Exporter (göndərən/satıcı) və Importer (alan/consignee) adlarını çıxar. ' +
+                'Yalnız JSON qaytar: {"exporter":"","importer":""}. ' +
+                "Şirkət adlarını mümkün qədər dəqiq yaz, boşluqları düzəlt.",
+            },
+            {
+              type: "input_file",
+              filename: "document.pdf",
+              file_data: b64,
+            },
+          ],
+        },
+      ],
+    });
+
+    const outText = response.output_text || "{}";
+    let out = { exporter: "", importer: "" };
+    try {
+      out = JSON.parse(outText);
+    } catch {
+      out = { exporter: "", importer: "", raw: outText };
+    }
+
+    res.json({
+      exporter: out.exporter || "",
+      importer: out.importer || "",
+    });
+  } catch (e) {
+    console.error("ANALYZE VISION ERROR:", e);
+    res.status(500).json({ error: e?.message || "analyze_error" });
+  }
+});
+
+// =========================
+// ✅ Analyze (Simple) — KÖHNƏ (pdf-parse)
+// =========================
 app.post("/analyze-simple", async (req, res) => {
   try {
     const { pdfUrl } = req.body || {};
@@ -237,21 +191,23 @@ ${text}
 `;
 
     const resp = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4o-mini",
       temperature: 0,
       messages: [
         { role: "system", content: "Only valid JSON. No extra text." },
-        { role: "user", content: prompt }
-      ]
+        { role: "user", content: prompt },
+      ],
     });
 
     const content = resp.choices?.[0]?.message?.content || "{}";
     let out = { exporter: "", importer: "" };
-    try { out = JSON.parse(content); } catch {}
+    try {
+      out = JSON.parse(content);
+    } catch {}
 
     res.json({
       exporter: out.exporter || "",
-      importer: out.importer || ""
+      importer: out.importer || "",
     });
   } catch (e) {
     console.error("ANALYZE SIMPLE ERROR:", e);
@@ -259,6 +215,118 @@ ${text}
   }
 });
 
-// Railway PORT
+// =========================
+// ✅ Test page (indi Vision çağırır)
+// =========================
+app.get("/test-analyze", (req, res) => {
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.end(`
+    <h2>Analyze test (Vision)</h2>
+    <p>PDF URL:</p>
+    <input id="u" style="width:700px" placeholder="PDF URL yapışdır">
+    <button id="b">Analyze</button>
+    <pre id="o" style="background:#111;color:#0f0;padding:12px;white-space:pre-wrap"></pre>
+
+    <script>
+      document.getElementById('b').onclick = async () => {
+        const pdfUrl = document.getElementById('u').value.trim();
+        if(!pdfUrl) return alert('PDF URL daxil et');
+
+        const r = await fetch('/analyze-vision', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ pdfUrl })
+        });
+
+        const t = await r.text();
+        document.getElementById('o').textContent = 'Status: ' + r.status + '\\n' + t;
+      };
+    </script>
+  `);
+});
+
+// =========================
+// ✅ MySQL connection pool
+// =========================
+const pool = mysql.createPool({
+  host: process.env.MYSQLHOST,
+  port: Number(process.env.MYSQLPORT || 3306),
+  user: process.env.MYSQLUSER,
+  password: process.env.MYSQLPASSWORD,
+  database: process.env.MYSQLDATABASE,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});
+
+// ✅ Sağlamlıq testi
+app.get("/health", async (req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT 1 AS ok");
+    res.json({ status: "ok", db: rows[0].ok });
+  } catch (e) {
+    console.error("HEALTH ERROR:", e);
+    res.status(500).json({
+      status: "error",
+      name: e?.name || null,
+      code: e?.code || null,
+      errno: e?.errno || null,
+      message: e?.message || null,
+      sqlState: e?.sqlState || null,
+    });
+  }
+});
+
+// ✅ NV search
+app.get("/nv/search", async (req, res) => {
+  try {
+    const reg = (req.query.reg_code || "").trim();
+    if (!reg) return res.status(400).json({ error: "reg_code is required" });
+
+    const [rows] = await pool.query(
+      `SELECT id, nv_reg_code, nv_number, nv_marka, nv_type, nv_country
+       FROM nv_info
+       WHERE nv_reg_code = ?
+       LIMIT 1`,
+      [reg]
+    );
+
+    if (rows.length === 0) return res.status(404).json({ error: "not found" });
+    res.json(rows[0]);
+  } catch (e) {
+    console.error("NV SEARCH ERROR:", e);
+    res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+app.get("/nv", async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit || 100), 500);
+    const [rows] = await pool.query(
+      "SELECT id, nv_reg_code, nv_number, nv_marka, nv_type, nv_country FROM nv_info ORDER BY id DESC LIMIT ?",
+      [limit]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error("NV LIST ERROR:", e);
+    res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+app.get("/nv/latest", async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      "SELECT id, nv_reg_code, nv_number, nv_marka, nv_type, nv_country FROM nv_info ORDER BY id DESC LIMIT 1"
+    );
+    res.json(rows[0] || {});
+  } catch (e) {
+    console.error("NV LATEST ERROR:", e);
+    res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// =========================
+// ✅ Listen
+// =========================
 const port = Number(process.env.PORT || 3000);
 app.listen(port, () => console.log("API running on port", port));
