@@ -6,6 +6,9 @@ import "dotenv/config";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import OpenAI from "openai";
+import pdf from "pdf-parse";
+
 
 console.log("SERVER VERSION: test-analyze route included ✅");
 
@@ -201,6 +204,58 @@ app.get("/nv/latest", async (req, res) => {
   } catch (e) {
     console.error("NV LATEST ERROR:", e);
     res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+async function fetchPdfBuffer(pdfUrl){
+  const r = await fetch(pdfUrl);
+  if (!r.ok) throw new Error("pdf_fetch_failed");
+  const arr = await r.arrayBuffer();
+  return Buffer.from(arr);
+}
+
+app.post("/analyze-simple", async (req, res) => {
+  try {
+    const { pdfUrl } = req.body || {};
+    if (!pdfUrl) return res.status(400).json({ error: "pdfUrl is required" });
+
+    const buf = await fetchPdfBuffer(pdfUrl);
+
+    // OCR YOX: PDF-in text layer-i varsa işləyəcək
+    const parsed = await pdf(buf);
+    const text = (parsed.text || "").slice(0, 20000);
+
+    const prompt = `
+Mətn CMR+Invoice-dan çıxarılıb.
+Exporter (göndərən/satıcı) və Importer (alan/consignee) adlarını tap.
+Yalnız JSON qaytar:
+{"exporter":"","importer":""}
+
+Mətn:
+${text}
+`;
+
+    const resp = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      temperature: 0,
+      messages: [
+        { role: "system", content: "Only valid JSON. No extra text." },
+        { role: "user", content: prompt }
+      ]
+    });
+
+    const content = resp.choices?.[0]?.message?.content || "{}";
+    let out = { exporter: "", importer: "" };
+    try { out = JSON.parse(content); } catch {}
+
+    res.json({
+      exporter: out.exporter || "",
+      importer: out.importer || ""
+    });
+  } catch (e) {
+    console.error("ANALYZE SIMPLE ERROR:", e);
+    res.status(500).json({ error: e?.message || "analyze_error" });
   }
 });
 
