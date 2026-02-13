@@ -134,8 +134,6 @@ app.post("/analyze-vision", async (req, res) => {
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       temperature: 0,
-
-      // ✅ DÜZGÜN: name buradadır
       text: {
         format: {
           type: "json_schema",
@@ -148,13 +146,12 @@ app.post("/analyze-vision", async (req, res) => {
               exporter: { type: "string" },
               importer: { type: "string" },
               exporter_source: { type: "string" },
-              importer_source: { type: "string" }
+              importer_source: { type: "string" },
             },
-            required: ["exporter", "importer", "exporter_source", "importer_source"]
-          }
-        }
+            required: ["exporter", "importer", "exporter_source", "importer_source"],
+          },
+        },
       },
-
       input: [
         {
           role: "user",
@@ -169,48 +166,43 @@ app.post("/analyze-vision", async (req, res) => {
                 "- Importer = CONSIGNEE (box 2)\n" +
                 "Adları sənəddə necə yazılıbsa elə yaz.\n" +
                 "exporter_source və importer_source sahələrinə sənəddən həmin sətiri qısa şəkildə kopyala (maks 120 simvol).\n" +
-                "Tapılmasa boş string qaytar."
-            }
-          ]
-        }
-      ]
+                "Tapılmasa boş string qaytar.",
+            },
+          ],
+        },
+      ],
     });
 
     const outText = response.output_text || "{}";
+
     let out = {
       exporter: "",
       importer: "",
       exporter_source: "",
-      importer_source: ""
+      importer_source: "",
     };
-    try { out = JSON.parse(outText); } catch {}
+    try {
+      out = JSON.parse(outText);
+    } catch (err) {
+      // schema strict olsa da, ehtiyat üçün
+      out = {
+        exporter: "",
+        importer: "",
+        exporter_source: "",
+        importer_source: "",
+      };
+    }
 
-    // İstəsən sonradan sil:
+    // istəsən sonra sil:
     // await openai.files.delete(file.id);
 
-    return res.json(out);
+    res.json(out);
   } catch (e) {
     console.error("ANALYZE VISION ERROR:", e);
-    return res.status(500).json({ error: e?.message || "analyze_error" });
+    res.status(500).json({ error: e?.message || "analyze_error" });
   }
 });
 
-    const outText = response.output_text || "{}";
-
-    let out;
-    try { out = JSON.parse(outText); }
-    catch { out = { exporter: "", importer: "", exporter_source: "", importer_source: "" }; }
-
-    // istəyirsənsə, faylı sonra sil (xərcləri/qarışıqlığı azaldır)
-    // await openai.files.delete(file.id);
-
-    return res.json(out);
-
-  } catch (e) {
-    console.error("ANALYZE VISION ERROR:", e);
-    return res.status(500).json({ error: e?.message || "analyze_error" });
-  }
-});
 
 
 
