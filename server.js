@@ -122,7 +122,6 @@ app.post("/analyze-vision", async (req, res) => {
 
     const b64 = await fetchPdfBase64(pdfUrl);
 
-    // OpenAI Responses API: PDF input_file kimi göndəririk
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       temperature: 0,
@@ -131,40 +130,39 @@ app.post("/analyze-vision", async (req, res) => {
           role: "user",
           content: [
             {
-              type: "text",
+              type: "input_text",
               text:
                 'Bu PDF-də 1-ci səhifə CMR, 2-ci səhifə Invoice-dir. ' +
                 'Exporter (göndərən/satıcı) və Importer (alan/consignee) adlarını çıxar. ' +
                 'Yalnız JSON qaytar: {"exporter":"","importer":""}. ' +
-                "Şirkət adlarını mümkün qədər dəqiq yaz, boşluqları düzəlt.",
+                "Şirkət adlarını mümkün qədər dəqiq yaz, artıq boşluqları düzəlt."
             },
             {
               type: "input_file",
               filename: "document.pdf",
-              file_data: b64,
-            },
-          ],
-        },
-      ],
+              file_data: b64
+            }
+          ]
+        }
+      ]
     });
 
     const outText = response.output_text || "{}";
+
     let out = { exporter: "", importer: "" };
-    try {
-      out = JSON.parse(outText);
-    } catch {
-      out = { exporter: "", importer: "", raw: outText };
-    }
+    try { out = JSON.parse(outText); }
+    catch { out = { exporter: "", importer: "", raw: outText }; }
 
     res.json({
       exporter: out.exporter || "",
-      importer: out.importer || "",
+      importer: out.importer || ""
     });
   } catch (e) {
     console.error("ANALYZE VISION ERROR:", e);
     res.status(500).json({ error: e?.message || "analyze_error" });
   }
 });
+
 
 // =========================
 // ✅ Analyze (Simple) — KÖHNƏ (pdf-parse)
