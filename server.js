@@ -169,6 +169,87 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
+
+/* ================= TEST UI PAGE ================= */
+
+app.get("/test", (req, res) => {
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>PDF Analyze Test</title>
+      <style>
+        body { font-family: Arial; max-width: 800px; margin: 40px auto; }
+        input { width: 100%; padding: 10px; margin-bottom: 10px; }
+        button { padding: 10px 20px; cursor: pointer; }
+        pre { background: #f4f4f4; padding: 15px; margin-top: 20px; }
+      </style>
+    </head>
+    <body>
+
+      <h2>PDF Link ilə Analiz Testi</h2>
+
+      <input type="text" id="pdfUrl" placeholder="PDF linkini buraya yapışdır">
+      <button onclick="analyze()">Analiz et</button>
+
+      <pre id="result"></pre>
+
+      <script>
+        async function analyze() {
+
+          const url = document.getElementById("pdfUrl").value;
+          const resultBox = document.getElementById("result");
+          resultBox.innerText = "Yüklənir...";
+
+          try {
+
+            // 1️⃣ PDF download et
+            const pdfRes = await fetch(url);
+            const blob = await pdfRes.blob();
+
+            const formData = new FormData();
+            formData.append("file", blob, "test.pdf");
+
+            // 2️⃣ Upload
+            const uploadRes = await fetch("/upload", {
+              method: "POST",
+              body: formData
+            });
+
+            const uploadData = await uploadRes.json();
+
+            if (!uploadData.file_id) {
+              resultBox.innerText = JSON.stringify(uploadData, null, 2);
+              return;
+            }
+
+            // 3️⃣ Analyze
+            const analyzeRes = await fetch("/analyze", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                file_id: uploadData.file_id
+              })
+            });
+
+            const analyzeData = await analyzeRes.json();
+
+            resultBox.innerText = JSON.stringify(analyzeData, null, 2);
+
+          } catch (err) {
+            resultBox.innerText = err.toString();
+          }
+        }
+      </script>
+
+    </body>
+    </html>
+  `);
+});
+
 /* ================= START ================= */
 
 app.listen(PORT, () => {
