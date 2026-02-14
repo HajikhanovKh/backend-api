@@ -41,7 +41,7 @@ const upload = multer({
 /* ================= OpenAI FILE UPLOAD ================= */
 async function uploadToOpenAI(buffer, filename, mimetype) {
   const form = new FormData();
-  form.append("purpose", "responses");
+  form.append("purpose", "assistants"); // ✅ düz
   form.append("file", new Blob([buffer], { type: mimetype }), filename);
 
   const res = await fetch("https://api.openai.com/v1/files", {
