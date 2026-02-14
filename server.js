@@ -1,7 +1,6 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import helmet from "helmet";
 import morgan from "morgan";
 import multer from "multer";
 import { z } from "zod";
@@ -21,7 +20,7 @@ if (!OPENAI_API_KEY) {
 
 const app = express();
 
-app.use(helmet());
+
 app.use(morgan("dev"));
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "2mb" }));
