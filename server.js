@@ -1,372 +1,219 @@
-// server.js (ESM)
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import mysql from "mysql2/promise";
-import "dotenv/config";
+import helmet from "helmet";
+import morgan from "morgan";
 import multer from "multer";
-import path from "path";
-import fs from "fs";
-import OpenAI, { toFile } from "openai";
-import pdf from "pdf-parse";
+import { z } from "zod";
 
-console.log("SERVER VERSION: upload + analyze-vision ✅");
+/* ================= CONFIG ================= */
+
+const PORT = process.env.PORT || 3000;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = "gpt-4o";
+
+if (!OPENAI_API_KEY) {
+  console.error("❌ OPENAI_API_KEY yoxdur!");
+  process.exit(1);
+}
+
+/* ================= APP ================= */
 
 const app = express();
 
-/** ✅ CORS */
-app.use(
-  cors({
-    origin: [
-      "https://avtomobil-ile-dasinan-mal.webflow.io",
-      "https://avtomobil-ile-dasinan-mal.com",
-    ],
-  })
-);
-// Alternativ (test üçün): app.use(cors());
+app.use(helmet());
+app.use(morgan("dev"));
+app.use(cors({ origin: "*" }));
+app.use(express.json({ limit: "2mb" }));
 
-app.use(express.json());
-
-// =========================
-// ✅ Upload (PDF) hissəsi
-// =========================
-const uploadDir = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
-
-// yüklənən faylları URL ilə açmaq üçün
-app.use("/uploads", express.static(uploadDir));
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
-    cb(null, Date.now() + "_" + safe);
-  },
-});
+/* ================= FILE UPLOAD ================= */
 
 const upload = multer({
-  storage,
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === "application/pdf") cb(null, true);
-    else cb(new Error("Only PDF allowed"));
-  },
-});
+    const allowed =
+      file.mimetype === "application/pdf" ||
+      file.mimetype === "image/png" ||
+      file.mimetype === "image/jpeg";
 
-// Webflow buraya multipart/form-data ilə "file" göndərəcək
-app.post("/upload", upload.single("file"), (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "file is required" });
-
-    const proto = req.headers["x-forwarded-proto"] || req.protocol;
-    const host = req.get("host");
-    const url = `${proto}://${host}/uploads/${req.file.filename}`;
-
-    return res.json({ url });
-  } catch (e) {
-    console.error("UPLOAD ERROR:", e);
-    return res.status(500).json({ error: e?.message || "upload_error" });
+    if (!allowed) return cb(new Error("Yalnız PDF/JPG/PNG icazəlidir"));
+    cb(null, true);
   }
 });
 
-// multer/fileFilter errorlarını JSON qaytarmaq üçün
-app.use((err, req, res, next) => {
-  if (err?.message === "Only PDF allowed") {
-    return res.status(400).json({ error: "only_pdf_allowed" });
-  }
-  if (err?.code === "LIMIT_FILE_SIZE") {
-    return res.status(413).json({ error: "file_too_large" });
-  }
-  if (err) {
-    console.error("MIDDLEWARE ERROR:", err);
-    return res.status(500).json({ error: err.message || "server_error" });
-  }
-  next();
-});
+/* ================= HELPERS ================= */
 
-// =========================
-// ✅ OpenAI
-// =========================
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+async function uploadToOpenAI(buffer, filename, mimetype) {
+  const form = new FormData();
+  form.append("purpose", "assistants");
+  form.append("file", new Blob([buffer], { type: mimetype }), filename);
 
-async function fetchPdfBuffer(pdfUrl) {
-  const r = await fetch(pdfUrl, {
-    method: "GET",
-    headers: { Accept: "application/pdf,*/*" },
+  const res = await fetch("https://api.openai.com/v1/files", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`
+    },
+    body: form
   });
 
-  if (!r.ok) {
-    const ct = r.headers.get("content-type");
-    const body = await r.text().catch(() => "");
-    throw new Error(
-      `pdf_fetch_failed status=${r.status} contentType=${ct} body=${body.slice(0, 200)}`
-    );
-  }
-
-  const arr = await r.arrayBuffer();
-  return Buffer.from(arr);
+  const data = await res.json();
+  if (!res.ok) throw new Error(JSON.stringify(data));
+  return data;
 }
 
-// ✅ Vision üçün base64
-async function fetchPdfBase64(pdfUrl) {
-  const buf = await fetchPdfBuffer(pdfUrl);
-  return buf.toString("base64");
+/* ================= ANALYZE FUNCTION ================= */
+
+async function analyzeFile(file_id) {
+
+  const prompt = `
+Sən beynəlxalq daşımalar üzrə sənəd analiz edən AI sistemisən.
+
+Sənə verilən fayl CMR və ya Invoice ola bilər.
+Sən hər iki sənəd tipində aşağıdakı məlumatları tapmalısan:
+
+1) Malın adı (Goods description / Product name)
+2) VIN kodu (17 simvolluq avtomobil identifikasiya nömrəsi, varsa)
+3) İdxalatçı (Importer / Consignee)
+4) İxracatçı (Exporter / Shipper / Consignor)
+
+Qaydalar:
+
+- CMR-də:
+  Exporter = Consignor
+  Importer = Consignee
+
+- Invoice-də:
+  Exporter = Seller / Shipper
+  Importer = Buyer
+
+- VIN 17 simvoldan ibarət olur (A-Z və 0-9)
+- Əgər məlumat tapılmazsa null yaz
+- Yalnız JSON qaytar
+
+JSON strukturu:
+
+{
+  "doc_type": "CMR | INVOICE | UNKNOWN",
+  "goods_name": "",
+  "vin": "",
+  "exporter": "",
+  "importer": "",
+  "confidence": 0
 }
+`;
 
-// =========================
-// ✅ Analyze (Vision) — TÖVSİYƏ OLUNAN
-// =========================
-
-
-// ...
-
-app.post("/analyze-vision", async (req, res) => {
-  try {
-    const { pdfUrl } = req.body || {};
-    if (!pdfUrl) return res.status(400).json({ error: "pdfUrl is required" });
-
-    const buf = await fetchPdfBuffer(pdfUrl);
-
-    const file = await openai.files.create({
-      file: await toFile(buf, "document.pdf"),
-      purpose: "user_data",
-    });
-
-    const response = await openai.responses.create({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      text: {
-        format: {
-          type: "json_schema",
-          name: "parties",
-          strict: true,
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              exporter: { type: "string" },
-              importer: { type: "string" },
-              exporter_source: { type: "string" },
-              importer_source: { type: "string" },
-            },
-            required: ["exporter", "importer", "exporter_source", "importer_source"],
-          },
-        },
-      },
+  const res = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
       input: [
         {
           role: "user",
           content: [
-            { type: "input_file", file_id: file.id },
-            {
-              type: "input_text",
-              text:
-                "Bu PDF 2 səhifədir: 1-ci səhifə CMR, 2-ci səhifə Invoice.\n" +
-                "Yalnız CMR (1-ci səhifə) üzrə çıxar:\n" +
-                "- Exporter = CONSIGNOR / SENDER (box 1)\n" +
-                "- Importer = CONSIGNEE (box 2)\n" +
-                "Adları sənəddə necə yazılıbsa elə yaz.\n" +
-                "exporter_source və importer_source sahələrinə sənəddən həmin sətiri qısa şəkildə kopyala (maks 120 simvol).\n" +
-                "Tapılmasa boş string qaytar.",
-            },
-          ],
-        },
+            { type: "input_text", text: prompt },
+            { type: "input_file", file_id }
+          ]
+        }
       ],
-    });
+      response_format: { type: "json_object" }
+    })
+  });
 
-    const outText = response.output_text || "{}";
+  const data = await res.json();
+  if (!res.ok) throw new Error(JSON.stringify(data));
 
-    let out = {
-      exporter: "",
-      importer: "",
-      exporter_source: "",
-      importer_source: "",
-    };
-    try {
-      out = JSON.parse(outText);
-    } catch (err) {
-      // schema strict olsa da, ehtiyat üçün
-      out = {
-        exporter: "",
-        importer: "",
-        exporter_source: "",
-        importer_source: "",
-      };
+  const text =
+    data.output_text ||
+    data?.output?.[0]?.content?.[0]?.text;
+
+  let parsed = JSON.parse(text);
+
+  /* ====== VIN əlavə yoxlama (regex fallback) ====== */
+  const vinRegex = /\b[A-HJ-NPR-Z0-9]{17}\b/g;
+  const vinMatch = text.match(vinRegex);
+
+  if (!parsed.vin && vinMatch) {
+    parsed.vin = vinMatch[0];
+  }
+
+  return parsed;
+}
+
+/* ================= ROUTES ================= */
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+/* 1️⃣ UPLOAD */
+
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+
+    if (!req.file) {
+      return res.status(400).json({ error: "Fayl tapılmadı" });
     }
 
-    // istəsən sonra sil:
-    // await openai.files.delete(file.id);
-
-    res.json(out);
-  } catch (e) {
-    console.error("ANALYZE VISION ERROR:", e);
-    res.status(500).json({ error: e?.message || "analyze_error" });
-  }
-});
-
-
-
-
-// =========================
-// ✅ Analyze (Simple) — KÖHNƏ (pdf-parse)
-// =========================
-app.post("/analyze-simple", async (req, res) => {
-  try {
-    const { pdfUrl } = req.body || {};
-    if (!pdfUrl) return res.status(400).json({ error: "pdfUrl is required" });
-
-    const buf = await fetchPdfBuffer(pdfUrl);
-
-    // OCR YOX: PDF-in text layer-i varsa işləyəcək
-    const parsed = await pdf(buf);
-    const text = (parsed.text || "").slice(0, 20000);
-
-    const prompt = `
-Mətn CMR+Invoice-dan çıxarılıb.
-Exporter (göndərən/satıcı) və Importer (alan/consignee) adlarını tap.
-Yalnız JSON qaytar:
-{"exporter":"","importer":""}
-
-Mətn:
-${text}
-`;
-
-    const resp = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      messages: [
-        { role: "system", content: "Only valid JSON. No extra text." },
-        { role: "user", content: prompt },
-      ],
-    });
-
-    const content = resp.choices?.[0]?.message?.content || "{}";
-    let out = { exporter: "", importer: "" };
-    try {
-      out = JSON.parse(content);
-    } catch {}
+    const uploaded = await uploadToOpenAI(
+      req.file.buffer,
+      req.file.originalname,
+      req.file.mimetype
+    );
 
     res.json({
-      exporter: out.exporter || "",
-      importer: out.importer || "",
+      status: "uploaded",
+      file_id: uploaded.id
     });
-  } catch (e) {
-    console.error("ANALYZE SIMPLE ERROR:", e);
-    res.status(500).json({ error: e?.message || "analyze_error" });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// =========================
-// ✅ Test page (indi Vision çağırır)
-// =========================
-app.get("/test-analyze", (req, res) => {
-  res.setHeader("content-type", "text/html; charset=utf-8");
-  res.end(`
-    <h2>Analyze test (Vision)</h2>
-    <p>PDF URL:</p>
-    <input id="u" style="width:700px" placeholder="PDF URL yapışdır">
-    <button id="b">Analyze</button>
-    <pre id="o" style="background:#111;color:#0f0;padding:12px;white-space:pre-wrap"></pre>
+/* 2️⃣ ANALYZE */
 
-    <script>
-      document.getElementById('b').onclick = async () => {
-        const pdfUrl = document.getElementById('u').value.trim();
-        if(!pdfUrl) return alert('PDF URL daxil et');
-
-        const r = await fetch('/analyze-vision', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ pdfUrl })
-        });
-
-        const t = await r.text();
-        document.getElementById('o').textContent = 'Status: ' + r.status + '\\n' + t;
-      };
-    </script>
-  `);
-});
-
-// =========================
-// ✅ MySQL connection pool
-// =========================
-const pool = mysql.createPool({
-  host: process.env.MYSQLHOST,
-  port: Number(process.env.MYSQLPORT || 3306),
-  user: process.env.MYSQLUSER,
-  password: process.env.MYSQLPASSWORD,
-  database: process.env.MYSQLDATABASE,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-});
-
-// ✅ Sağlamlıq testi
-app.get("/health", async (req, res) => {
+app.post("/analyze", async (req, res) => {
   try {
-    const [rows] = await pool.query("SELECT 1 AS ok");
-    res.json({ status: "ok", db: rows[0].ok });
-  } catch (e) {
-    console.error("HEALTH ERROR:", e);
-    res.status(500).json({
-      status: "error",
-      name: e?.name || null,
-      code: e?.code || null,
-      errno: e?.errno || null,
-      message: e?.message || null,
-      sqlState: e?.sqlState || null,
+
+    const schema = z.object({
+      file_id: z.string()
     });
+
+    const { file_id } = schema.parse(req.body);
+
+    const result = await analyzeFile(file_id);
+
+    res.json({
+      status: "analyzed",
+      data: result
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ✅ NV search
-app.get("/nv/search", async (req, res) => {
-  try {
-    const reg = (req.query.reg_code || "").trim();
-    if (!reg) return res.status(400).json({ error: "reg_code is required" });
+/* ================= ERROR HANDLER ================= */
 
-    const [rows] = await pool.query(
-      `SELECT id, nv_reg_code, nv_number, nv_marka, nv_type, nv_country
-       FROM nv_info
-       WHERE nv_reg_code = ?
-       LIMIT 1`,
-      [reg]
-    );
-
-    if (rows.length === 0) return res.status(404).json({ error: "not found" });
-    res.json(rows[0]);
-  } catch (e) {
-    console.error("NV SEARCH ERROR:", e);
-    res.status(500).json({ error: e?.message || "server_error" });
+app.use((err, req, res, next) => {
+  if (err?.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({ error: "Fayl çox böyükdür (max 25MB)" });
   }
+  if (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  next();
 });
 
-app.get("/nv", async (req, res) => {
-  try {
-    const limit = Math.min(Number(req.query.limit || 100), 500);
-    const [rows] = await pool.query(
-      "SELECT id, nv_reg_code, nv_number, nv_marka, nv_type, nv_country FROM nv_info ORDER BY id DESC LIMIT ?",
-      [limit]
-    );
-    res.json(rows);
-  } catch (e) {
-    console.error("NV LIST ERROR:", e);
-    res.status(500).json({ error: e?.message || "server_error" });
-  }
-});
+/* ================= START ================= */
 
-app.get("/nv/latest", async (req, res) => {
-  try {
-    const [rows] = await pool.query(
-      "SELECT id, nv_reg_code, nv_number, nv_marka, nv_type, nv_country FROM nv_info ORDER BY id DESC LIMIT 1"
-    );
-    res.json(rows[0] || {});
-  } catch (e) {
-    console.error("NV LATEST ERROR:", e);
-    res.status(500).json({ error: e?.message || "server_error" });
-  }
+app.listen(PORT, () => {
+  console.log(`🚀 Server işləyir: ${PORT}`);
 });
-
-// =========================
-// ✅ Listen
-// =========================
-const port = Number(process.env.PORT || 3000);
-app.listen(port, () => console.log("API running on port", port));
