@@ -1,49 +1,31 @@
 import "dotenv/config";
 import express from "express";
-import cors from "cors";
-import morgan from "morgan";
 import multer from "multer";
-import { z } from "zod";
 
-/* ================= CONFIG ================= */
-
+const app = express();
 const PORT = process.env.PORT || 3000;
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = "gpt-4o";
 
 if (!OPENAI_API_KEY) {
-  console.error("❌ OPENAI_API_KEY yoxdur!");
+  console.error("OPENAI_API_KEY yoxdur!");
   process.exit(1);
 }
 
-/* ================= APP ================= */
+app.use(express.json());
 
-const app = express();
-
-
-app.use(morgan("dev"));
-app.use(cors({ origin: "*" }));
-app.use(express.json({ limit: "2mb" }));
-
-/* ================= FILE UPLOAD ================= */
+/* ========= FILE UPLOAD ========= */
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowed =
-      file.mimetype === "application/pdf" ||
-      file.mimetype === "image/png" ||
-      file.mimetype === "image/jpeg";
-
-    if (!allowed) return cb(new Error("Yalnız PDF/JPG/PNG icazəlidir"));
-    cb(null, true);
-  }
+  limits: { fileSize: 25 * 1024 * 1024 }
 });
 
-/* ================= HELPERS ================= */
+/* ========= OpenAI Upload ========= */
 
 async function uploadToOpenAI(buffer, filename, mimetype) {
+
   const form = new FormData();
   form.append("purpose", "assistants");
   form.append("file", new Blob([buffer], { type: mimetype }), filename);
@@ -61,39 +43,22 @@ async function uploadToOpenAI(buffer, filename, mimetype) {
   return data;
 }
 
-/* ================= ANALYZE FUNCTION ================= */
+/* ========= Analyze ========= */
 
 async function analyzeFile(file_id) {
 
   const prompt = `
-Sən beynəlxalq daşımalar üzrə sənəd analiz edən AI sistemisən.
+CMR və ya Invoice sənədindən aşağıdakı məlumatları tap:
 
-Sənə verilən fayl CMR və ya Invoice ola bilər.
-Sən hər iki sənəd tipində aşağıdakı məlumatları tapmalısan:
+- Malın adı
+- VIN (17 simvol varsa)
+- İdxalatçı
+- İxracatçı
 
-1) Malın adı (Goods description / Product name)
-2) VIN kodu (17 simvolluq avtomobil identifikasiya nömrəsi, varsa)
-3) İdxalatçı (Importer / Consignee)
-4) İxracatçı (Exporter / Shipper / Consignor)
-
-Qaydalar:
-
-- CMR-də:
-  Exporter = Consignor
-  Importer = Consignee
-
-- Invoice-də:
-  Exporter = Seller / Shipper
-  Importer = Buyer
-
-- VIN 17 simvoldan ibarət olur (A-Z və 0-9)
-- Əgər məlumat tapılmazsa null yaz
-- Yalnız JSON qaytar
-
-JSON strukturu:
+Yalnız JSON qaytar:
 
 {
-  "doc_type": "CMR | INVOICE | UNKNOWN",
+  "doc_type": "",
   "goods_name": "",
   "vin": "",
   "exporter": "",
@@ -130,32 +95,20 @@ JSON strukturu:
     data.output_text ||
     data?.output?.[0]?.content?.[0]?.text;
 
-  let parsed = JSON.parse(text);
-
-  /* ====== VIN əlavə yoxlama (regex fallback) ====== */
-  const vinRegex = /\b[A-HJ-NPR-Z0-9]{17}\b/g;
-  const vinMatch = text.match(vinRegex);
-
-  if (!parsed.vin && vinMatch) {
-    parsed.vin = vinMatch[0];
-  }
-
-  return parsed;
+  return JSON.parse(text);
 }
 
-/* ================= ROUTES ================= */
+/* ========= ROUTES ========= */
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-/* 1️⃣ UPLOAD */
-
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
 
     if (!req.file) {
-      return res.status(400).json({ error: "Fayl tapılmadı" });
+      return res.status(400).json({ error: "Fayl yoxdur" });
     }
 
     const uploaded = await uploadToOpenAI(
@@ -170,21 +123,17 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/* 2️⃣ ANALYZE */
-
 app.post("/analyze", async (req, res) => {
   try {
 
-    const schema = z.object({
-      file_id: z.string()
-    });
-
-    const { file_id } = schema.parse(req.body);
+    const { file_id } = req.body;
+    if (!file_id) {
+      return res.status(400).json({ error: "file_id lazımdır" });
+    }
 
     const result = await analyzeFile(file_id);
 
@@ -194,25 +143,12 @@ app.post("/analyze", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/* ================= ERROR HANDLER ================= */
-
-app.use((err, req, res, next) => {
-  if (err?.code === "LIMIT_FILE_SIZE") {
-    return res.status(413).json({ error: "Fayl çox böyükdür (max 25MB)" });
-  }
-  if (err) {
-    return res.status(400).json({ error: err.message });
-  }
-  next();
-});
-
-/* ================= START ================= */
+/* ========= START ========= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server işləyir: ${PORT}`);
+  console.log("Server başladı:", PORT);
 });
