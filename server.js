@@ -15,14 +15,34 @@ if (!OPENAI_API_KEY) {
 
 app.use(express.json());
 
-/* ========= FILE UPLOAD ========= */
+/* ================= CORS FIX ================= */
+
+/* Əgər yalnız Webflow icazə vermək istəyirsənsə:
+const ALLOWED_ORIGIN = "https://avtomobil-ile-dasinma1.webflow.io";
+*/
+
+app.use((req, res, next) => {
+
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  // Preflight request üçün
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
+
+/* ================= FILE UPLOAD ================= */
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }
 });
 
-/* ========= OpenAI Upload ========= */
+/* ================= OpenAI Upload ================= */
 
 async function uploadToOpenAI(buffer, filename, mimetype) {
 
@@ -43,7 +63,7 @@ async function uploadToOpenAI(buffer, filename, mimetype) {
   return data;
 }
 
-/* ========= Analyze ========= */
+/* ================= Analyze ================= */
 
 async function analyzeFile(file_id) {
 
@@ -98,7 +118,7 @@ Yalnız JSON qaytar:
   return JSON.parse(text);
 }
 
-/* ========= ROUTES ========= */
+/* ================= ROUTES ================= */
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
@@ -123,6 +143,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     });
 
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -143,11 +164,12 @@ app.post("/analyze", async (req, res) => {
     });
 
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/* ========= START ========= */
+/* ================= START ================= */
 
 app.listen(PORT, () => {
   console.log("Server başladı:", PORT);
