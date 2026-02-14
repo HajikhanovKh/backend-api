@@ -4,7 +4,6 @@ import multer from "multer";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = "gpt-4o";
 
@@ -15,34 +14,24 @@ if (!OPENAI_API_KEY) {
 
 app.use(express.json());
 
-/* ================= CORS FIX ================= */
-
-/* Əgər yalnız Webflow icazə vermək istəyirsənsə:
-const ALLOWED_ORIGIN = "https://avtomobil-ile-dasinma1.webflow.io";
-*/
+/* ================= CORS ================= */
 
 app.use((req, res, next) => {
-
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-
-  // Preflight request üçün
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
-  }
-
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
 
-/* ================= FILE UPLOAD ================= */
+/* ================= MULTER (RAM) ================= */
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }
 });
 
-/* ================= OpenAI Upload ================= */
+/* ================= OpenAI FILE UPLOAD ================= */
 
 async function uploadToOpenAI(buffer, filename, mimetype) {
 
@@ -60,31 +49,40 @@ async function uploadToOpenAI(buffer, filename, mimetype) {
 
   const data = await res.json();
   if (!res.ok) throw new Error(JSON.stringify(data));
-  return data;
+  return data.id;
 }
 
-/* ================= Analyze ================= */
+/* ================= ANALYZE ================= */
 
-async function analyzeFile(file_id) {
+async function analyzeFile(file_id){
 
   const prompt = `
-CMR və ya Invoice sənədindən aşağıdakı məlumatları tap:
+Sən CMR və Invoice sənədlərini analiz edən sistemsən.
 
-- Malın adı
-- VIN (17 simvol varsa)
-- İdxalatçı
-- İxracatçı
-
-Yalnız JSON qaytar:
+Aşağıdakı məlumatları tap və yalnız JSON qaytar:
 
 {
-  "doc_type": "",
-  "goods_name": "",
-  "vin": "",
-  "exporter": "",
-  "importer": "",
-  "confidence": 0
+  "cmr": {
+    "exporter": "",
+    "importer": "",
+    "goods_name": "",
+    "vin": ""
+  },
+  "invoice": {
+    "exporter": "",
+    "importer": "",
+    "goods_name": "",
+    "vin": ""
+  }
 }
+
+Qaydalar:
+- CMR-də Exporter = Consignor
+- CMR-də Importer = Consignee
+- Invoice-də Exporter = Seller
+- Invoice-də Importer = Buyer
+- VIN 17 simvolluq koddur (A-Z və 0-9)
+- Tapılmayan sahə boş string olsun
 `;
 
   const res = await fetch("https://api.openai.com/v1/responses", {
@@ -118,140 +116,40 @@ Yalnız JSON qaytar:
   return JSON.parse(text);
 }
 
-/* ================= ROUTES ================= */
-
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
-});
+/* ================= ROUTE ================= */
 
 app.post("/upload", upload.single("file"), async (req, res) => {
+
   try {
 
     if (!req.file) {
       return res.status(400).json({ error: "Fayl yoxdur" });
     }
 
-    const uploaded = await uploadToOpenAI(
+    const file_id = await uploadToOpenAI(
       req.file.buffer,
       req.file.originalname,
       req.file.mimetype
     );
 
+    const analysis = await analyzeFile(file_id);
+
     res.json({
-      status: "uploaded",
-      file_id: uploaded.id
+      status: "success",
+      analysis
     });
 
-  } catch (err) {
+  } catch(err){
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+
 });
 
-app.post("/analyze", async (req, res) => {
-  try {
-
-    const { file_id } = req.body;
-    if (!file_id) {
-      return res.status(400).json({ error: "file_id lazımdır" });
-    }
-
-    const result = await analyzeFile(file_id);
-
-    res.json({
-      status: "analyzed",
-      data: result
-    });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
+app.get("/health",(req,res)=>{
+  res.json({status:"ok"});
 });
 
-
-/* ================= TEST UI PAGE ================= */
-
-app.get("/test", (req, res) => {
-
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>PDF Analyze Test</title>
-      <style>
-        body { font-family: Arial; max-width: 800px; margin: 40px auto; }
-        input { width: 100%; padding: 10px; margin-bottom: 10px; }
-        button { padding: 10px 20px; cursor: pointer; }
-        pre { background: #f4f4f4; padding: 15px; margin-top: 20px; }
-      </style>
-    </head>
-    <body>
-
-      <h2>PDF Link ilə Analiz Testi</h2>
-
-      <input type="text" id="pdfUrl" placeholder="PDF linkini buraya yapışdır">
-      <button onclick="analyze()">Analiz et</button>
-
-      <pre id="result"></pre>
-
-      <script>
-        async function analyze() {
-
-          const url = document.getElementById("pdfUrl").value;
-          const resultBox = document.getElementById("result");
-          resultBox.innerText = "Yüklənir...";
-
-          try {
-
-            // 1️⃣ PDF download et
-            const pdfRes = await fetch(url);
-            const blob = await pdfRes.blob();
-
-            const formData = new FormData();
-            formData.append("file", blob, "test.pdf");
-
-            // 2️⃣ Upload
-            const uploadRes = await fetch("/upload", {
-              method: "POST",
-              body: formData
-            });
-
-            const uploadData = await uploadRes.json();
-
-            if (!uploadData.file_id) {
-              resultBox.innerText = JSON.stringify(uploadData, null, 2);
-              return;
-            }
-
-            // 3️⃣ Analyze
-            const analyzeRes = await fetch("/analyze", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify({
-                file_id: uploadData.file_id
-              })
-            });
-
-            const analyzeData = await analyzeRes.json();
-
-            resultBox.innerText = JSON.stringify(analyzeData, null, 2);
-
-          } catch (err) {
-            resultBox.innerText = err.toString();
-          }
-        }
-      </script>
-
-    </body>
-    </html>
-  `);
-});
-
-/* ================= START ================= */
-
-app.listen(PORT, () => {
+app.listen(PORT, ()=>{
   console.log("Server başladı:", PORT);
 });
