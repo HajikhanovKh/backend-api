@@ -235,7 +235,8 @@ function extractFromText(text) {
 }
 
 async function analyzeWithDocumentAI(pdfBuffer) {
-  const projectId = process.env.GCP_PROJECT_ID;
+  const sa = JSON.parse(process.env.GCP_DOC_AI_KEY_JSON);
+  const projectId = process.env.GCP_PROJECT_ID || sa.project_id;
   const location = process.env.GCP_LOCATION; // məsələn: "eu" və ya "us"
   const processorId = process.env.DOC_AI_PROCESSOR_ID;
 
