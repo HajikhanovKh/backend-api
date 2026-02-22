@@ -1,272 +1,309 @@
-import "dotenv/config";
-import express from "express";
-import multer from "multer";
-import crypto from "crypto";
+// server.js
+require("dotenv").config();
+
+const express = require("express");
+const cors = require("cors");
+const multer = require("multer");
+const crypto = require("crypto");
+
+const { OpenAI } = require("openai");
+const vision = require("@google-cloud/vision");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(cors());
+app.use(express.json({ limit: "10mb" }));
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = "gpt-4o";
-
-if (!OPENAI_API_KEY) {
-  console.error("OPENAI_API_KEY yoxdur!");
-  process.exit(1);
-}
-
-app.use(express.json());
-
-/* ================= CORS ================= */
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
-/* ================= MULTER (RAM) ================= */
+// -------------------- Multer (RAM-da saxla) --------------------
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const ok =
-      file.mimetype === "application/pdf" ||
-      file.mimetype === "image/png" ||
-      file.mimetype === "image/jpeg";
-    if (!ok) return cb(new Error("Yalnız PDF/JPG/PNG icazəlidir"));
-    cb(null, true);
-  }
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB (istəsən artır)
 });
 
-/* ================= SIMPLE CACHE (RAM) =================
-   Eyni PDF təkrar göndəriləndə eyni nəticə qaytarsın deyə.
-   Qeyd: Server restart olsa cache sıfırlanır.
-*/
-const analysisCache = new Map(); // key: sha256 -> value: analysis
+// -------------------- Clients --------------------
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ================= OpenAI FILE UPLOAD ================= */
-async function uploadToOpenAI(buffer, filename, mimetype) {
-  const form = new FormData();
-  form.append("purpose", "assistants");
-  form.append("file", new Blob([buffer], { type: mimetype }), filename);
+const visionClient = new vision.ImageAnnotatorClient({
+  credentials: JSON.parse(process.env.GCP_DOC_AI_KEY_JSON),
+});
 
-  const res = await fetch("https://api.openai.com/v1/files", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-    body: form
-  });
+// -------------------- Simple in-memory cache --------------------
+const CACHE = new Map(); // key: sha256(file) -> { analysis, provider, ts }
+const CACHE_TTL_MS = 1000 * 60 * 30; // 30 dəqiqə
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    console.error("OpenAI file upload error:", data);
-    throw new Error(JSON.stringify(data));
+function sha256(buf) {
+  return crypto.createHash("sha256").update(buf).digest("hex");
+}
+
+function cacheGet(key) {
+  const v = CACHE.get(key);
+  if (!v) return null;
+  if (Date.now() - v.ts > CACHE_TTL_MS) {
+    CACHE.delete(key);
+    return null;
   }
-  return data.id;
+  return v;
 }
 
-/* ================= POST-CHECK / NORMALIZE ================= */
-function normalizeAnalysis(a) {
-  const vinRegex = /^[A-HJ-NPR-Z0-9]{17}$/;
-
-  const fixVin = (v) => {
-    const s = String(v ?? "").trim().toUpperCase();
-    return vinRegex.test(s) ? s : "";
-  };
-
-  const fixKg = (v) => {
-    const s = String(v ?? "")
-      .toUpperCase()
-      .replace(",", ".")
-      .trim();
-    const m = s.match(/(\d+(\.\d+)?)/);
-    return m ? m[1] : "";
-  };
-
-  const fixText = (v) => String(v ?? "").trim();
-
-  const out = a && typeof a === "object" ? a : {};
-  out.cmr = out.cmr && typeof out.cmr === "object" ? out.cmr : {};
-  out.invoice = out.invoice && typeof out.invoice === "object" ? out.invoice : {};
-
-  // Ensure nested objects exist
-  out.cmr.exporter = out.cmr.exporter && typeof out.cmr.exporter === "object" ? out.cmr.exporter : { name: "", address: "" };
-  out.cmr.importer = out.cmr.importer && typeof out.cmr.importer === "object" ? out.cmr.importer : { name: "", address: "", id: "" };
-
-  out.invoice.exporter = out.invoice.exporter && typeof out.invoice.exporter === "object" ? out.invoice.exporter : { name: "", address: "" };
-  out.invoice.importer = out.invoice.importer && typeof out.invoice.importer === "object" ? out.invoice.importer : { name: "", address: "", id: "" };
-
-  // Trim all text fields
-  out.cmr.exporter.name = fixText(out.cmr.exporter.name);
-  out.cmr.exporter.address = fixText(out.cmr.exporter.address);
-  out.cmr.importer.name = fixText(out.cmr.importer.name);
-  out.cmr.importer.address = fixText(out.cmr.importer.address);
-  out.cmr.importer.id = fixText(out.cmr.importer.id);
-
-  out.cmr.goods_name = fixText(out.cmr.goods_name);
-  out.cmr.vin = fixVin(out.cmr.vin);
-  out.cmr.gross_weight_kg = fixKg(out.cmr.gross_weight_kg);
-  out.cmr.loading_place = fixText(out.cmr.loading_place);
-  out.cmr.delivery_place = fixText(out.cmr.delivery_place);
-  out.cmr.date = fixText(out.cmr.date);
-
-  out.invoice.exporter.name = fixText(out.invoice.exporter.name);
-  out.invoice.exporter.address = fixText(out.invoice.exporter.address);
-  out.invoice.importer.name = fixText(out.invoice.importer.name);
-  out.invoice.importer.address = fixText(out.invoice.importer.address);
-  out.invoice.importer.id = fixText(out.invoice.importer.id);
-
-  out.invoice.goods_name = fixText(out.invoice.goods_name);
-  out.invoice.vin = fixVin(out.invoice.vin);
-  out.invoice.invoice_no = fixText(out.invoice.invoice_no);
-  out.invoice.invoice_date = fixText(out.invoice.invoice_date);
-  out.invoice.total_amount = fixText(out.invoice.total_amount);
-
-  return out;
+function cacheSet(key, value) {
+  CACHE.set(key, { ...value, ts: Date.now() });
 }
 
-/* ================= ANALYZE ================= */
-async function analyzeFile(file_id) {
+// -------------------- Helpers: text -> structured fields --------------------
+function pickFirst(...vals) {
+  for (const v of vals) {
+    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+  }
+  return null;
+}
+
+function matchOne(text, patterns) {
+  if (!text) return null;
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m && m[1]) return m[1].trim();
+  }
+  return null;
+}
+
+function normalizeText(t) {
+  return (t || "")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Sadə extractor (istəsən sonra daha “smart” edərik)
+function extractFromVisionText(rawText) {
+  const text = normalizeText(rawText);
+
+  // VIN (17 simvol) üçün basic regex
+  const vin =
+    matchOne(text, [
+      /\bVIN[:\s]*([A-HJ-NPR-Z0-9]{17})\b/i,
+      /\b([A-HJ-NPR-Z0-9]{17})\b/,
+    ]) || null;
+
+  const gross =
+    matchOne(text, [
+      /\bGross\s*weight[:\s]*([0-9]+(?:[.,][0-9]+)?)\s*(kg)?\b/i,
+      /\bBrut(?:to)?[:\s]*([0-9]+(?:[.,][0-9]+)?)\b/i,
+    ]) || null;
+
+  const invoiceNo =
+    matchOne(text, [
+      /\bInvoice\s*(No|#|Number)[:\s]*([A-Z0-9\-\/]+)\b/i, // group 2 ola bilər
+    ]) || null;
+
+  // Yuxarıdakı regex-də group 2 olduğu üçün düzəldək:
+  const invoiceNoFixed = (() => {
+    const m = text.match(/\bInvoice\s*(?:No|#|Number)[:\s]*([A-Z0-9\-\/]+)\b/i);
+    return m?.[1]?.trim() || null;
+  })();
+
+  const invoiceDate =
+    matchOne(text, [
+      /\bInvoice\s*Date[:\s]*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})\b/i,
+      /\bDate[:\s]*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})\b/i,
+    ]) || null;
+
+  const total =
+    matchOne(text, [
+      /\bTotal(?:\s*Amount)?[:\s]*([0-9]+(?:[.,][0-9]+)?)\s*([A-Z]{3})?\b/i,
+      /\bGrand\s*Total[:\s]*([0-9]+(?:[.,][0-9]+)?)\s*([A-Z]{3})?\b/i,
+    ]) || null;
+
+  // Exporter / Importer üçün sadə başlıq əsaslı axtarış (çox PDF-də işləyir, hamısında yox)
+  const exporterName =
+    matchOne(text, [
+      /\bExporter[:\s]*([^\n]{3,80})/i,
+      /\bSender[:\s]*([^\n]{3,80})/i,
+      /\bConsignor[:\s]*([^\n]{3,80})/i,
+    ]) || null;
+
+  const importerName =
+    matchOne(text, [
+      /\bImporter[:\s]*([^\n]{3,80})/i,
+      /\bReceiver[:\s]*([^\n]{3,80})/i,
+      /\bConsignee[:\s]*([^\n]{3,80})/i,
+    ]) || null;
+
+  const goodsName =
+    matchOne(text, [
+      /\bGoods(?:\s*description)?[:\s]*([^\n]{3,120})/i,
+      /\bDescription[:\s]*([^\n]{3,120})/i,
+    ]) || null;
+
+  // CMR date / loading / delivery üçün də sadə nümunələr
+  const cmrDate =
+    matchOne(text, [
+      /\bCMR\s*Date[:\s]*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})\b/i,
+      /\bDate[:\s]*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})\b/i,
+    ]) || null;
+
+  const loadingPlace =
+    matchOne(text, [
+      /\bPlace\s*of\s*taking\s*over[:\s]*([^\n]{2,80})/i,
+      /\bLoading\s*place[:\s]*([^\n]{2,80})/i,
+    ]) || null;
+
+  const deliveryPlace =
+    matchOne(text, [
+      /\bPlace\s*designated\s*for\s*delivery[:\s]*([^\n]{2,80})/i,
+      /\bDelivery\s*place[:\s]*([^\n]{2,80})/i,
+    ]) || null;
+
+  return {
+    cmr: {
+      exporter: { name: exporterName || null, address: null },
+      importer: { name: importerName || null, id: null },
+      goods_name: goodsName || null,
+      vin,
+      gross_weight_kg: gross,
+      loading_place: loadingPlace,
+      delivery_place: deliveryPlace,
+      date: cmrDate,
+    },
+    invoice: {
+      exporter: { name: exporterName || null },
+      importer: { name: importerName || null, id: null },
+      goods_name: goodsName || null,
+      vin,
+      invoice_no: pickFirst(invoiceNoFixed, invoiceNo),
+      invoice_date: invoiceDate,
+      total_amount: total,
+    },
+  };
+}
+
+// -------------------- OpenAI extraction --------------------
+// Bu funksiya PDF buffer-i OpenAI-a göndərir və JSON qaytarır.
+// Səndə artıq işləyən prompt/format varsa, buranı ona uyğunlaşdır.
+async function analyzeWithOpenAI(pdfBuffer) {
+  const base64 = pdfBuffer.toString("base64");
+
   const prompt = `
-Sən CMR və Invoice sənədini analiz edirsən. Sənəd 2 səhifə ola bilər:
-- 1-ci səhifə: CMR
-- 2-ci səhifə: Invoice
+You will receive a PDF that contains 2 pages:
+- Page 1: CMR
+- Page 2: Invoice
 
-CMR oxunuş qaydası (ÇOX VACİB):
-- Qrafa 1 (yuxarı sol): Exporter/Consignor adı + ünvanı
-- Qrafa 2 (qrafa 1-in altında, sol): Importer/Consignee adı + ünvanı və ya ID
-- Orta hissə (qrafalar 6-12 arası ola bilər): malın adı (goods/vehicle description), VIN varsa, çəki (kg), ədəd/packaging
-- VIN 17 simvol olur (A-HJ-NPR-Z və 0-9)
-
-Invoice oxunuş qaydası:
-- Seller/Shipper -> exporter
-- Buyer/Consignee -> importer
-- Goods/Vehicle description, VIN, invoice number, invoice date, total amount
-
-Yalnız JSON qaytar (tapılmayan sahələr boş string):
-
+Extract structured data and return STRICT JSON with this schema:
 {
   "cmr": {
-    "exporter": {"name":"", "address":""},
-    "importer": {"name":"", "address":"", "id":""},
-    "goods_name": "",
-    "vin": "",
-    "gross_weight_kg": "",
-    "loading_place": "",
-    "delivery_place": "",
-    "date": ""
+    "exporter": {"name": string|null, "address": string|null},
+    "importer": {"name": string|null, "id": string|null},
+    "goods_name": string|null,
+    "vin": string|null,
+    "gross_weight_kg": string|number|null,
+    "loading_place": string|null,
+    "delivery_place": string|null,
+    "date": string|null
   },
   "invoice": {
-    "exporter": {"name":"", "address":""},
-    "importer": {"name":"", "address":"", "id":""},
-    "goods_name": "",
-    "vin": "",
-    "invoice_no": "",
-    "invoice_date": "",
-    "total_amount": ""
+    "exporter": {"name": string|null},
+    "importer": {"name": string|null, "id": string|null},
+    "goods_name": string|null,
+    "vin": string|null,
+    "invoice_no": string|null,
+    "invoice_date": string|null,
+    "total_amount": string|number|null
   }
 }
 
-Qaydalar:
-- VIN yalnız 17 simvol regex-ə uyğundursa yaz, yoxsa boş string.
-- CMR-də “Exporter/Importer” yerlərini qrafa 1 və 2-yə görə seç.
-- Əlavə izah yazma. Yalnız JSON.
-  `.trim();
+Return ONLY JSON. No extra text.
+`;
 
-  const res = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      temperature: 0,
-      top_p: 1,
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: prompt },
-            { type: "input_file", file_id }
-          ]
-        }
-      ],
-      text: { format: { type: "json_object" } }
-    })
+  // OpenAI Responses API (PDF input_file)
+  const resp = await openai.responses.create({
+    model: "gpt-4.1-mini", // istəsən dəyiş (səndə hansı stabil işləyirsə)
+    input: [
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: prompt },
+          {
+            type: "input_file",
+            filename: "document.pdf",
+            file_data: `data:application/pdf;base64,${base64}`,
+          },
+        ],
+      },
+    ],
   });
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    console.error("OpenAI responses error:", data);
-    throw new Error(JSON.stringify(data));
-  }
-
-  const text =
-    data.output_text ??
-    data?.output?.[0]?.content?.[0]?.text ??
-    "";
+  // Cavab mətnini götür
+  const outText = (resp.output_text || "").trim();
 
   let parsed;
   try {
-    parsed = JSON.parse(text);
-  } catch {
-    return { error: "JSON parse error", raw_text: text };
+    parsed = JSON.parse(outText);
+  } catch (e) {
+    // JSON parse alınmasa, debug üçün xətanı yuxarı qaldır
+    throw new Error("OpenAI JSON parse failed. Raw output: " + outText.slice(0, 800));
   }
 
-  return normalizeAnalysis(parsed);
+  return parsed;
 }
 
-/* ================= ROUTES ================= */
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
+// -------------------- Routes --------------------
+app.get("/", (req, res) => {
+  res.json({ ok: true, service: "pdf-analyzer", routes: ["/upload", "/upload/google-vision"] });
 });
 
-/**
- * POST /upload
- * form-data: file=<pdf>
- * returns: { status, analysis, cached }
- */
+// 1) OpenAI
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Fayl yoxdur" });
+    if (!req.file?.buffer) return res.status(400).json({ error: "File yoxdur" });
 
-    // ✅ hash -> cache
-    const hash = crypto
-      .createHash("sha256")
-      .update(req.file.buffer)
-      .digest("hex");
+    const fileBuf = req.file.buffer;
+    const key = "openai:" + sha256(fileBuf);
 
-    if (analysisCache.has(hash)) {
-      return res.json({
-        status: "success",
-        cached: true,
-        analysis: analysisCache.get(hash)
-      });
+    const cached = cacheGet(key);
+    if (cached) {
+      return res.json({ analysis: cached.analysis, provider: "openai", cached: true });
     }
 
-    // ✅ OpenAI upload -> analyze
-    const file_id = await uploadToOpenAI(
-      req.file.buffer,
-      req.file.originalname,
-      req.file.mimetype
-    );
+    const analysis = await analyzeWithOpenAI(fileBuf);
 
-    const analysis = await analyzeFile(file_id);
+    cacheSet(key, { analysis, provider: "openai" });
 
-    analysisCache.set(hash, analysis);
-
-    return res.json({
-      status: "success",
-      cached: false,
-      analysis
-    });
+    res.json({ analysis, provider: "openai", cached: false });
   } catch (err) {
-    console.error("UPLOAD/ANALYZE ERROR:", err?.message || err);
-    return res.status(500).json({ error: err?.message || "Server error" });
+    console.error("OPENAI ERROR:", err);
+    res.status(500).json({ error: "OpenAI xətası", details: String(err?.message || err) });
   }
 });
 
-app.listen(PORT, () => {
-  console.log("Server başladı:", PORT);
+// 2) Google Vision
+app.post("/upload/google-vision", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file?.buffer) return res.status(400).json({ error: "File yoxdur" });
+
+    const fileBuf = req.file.buffer;
+    const key = "vision:" + sha256(fileBuf);
+
+    const cached = cacheGet(key);
+    if (cached) {
+      return res.json({ analysis: cached.analysis, provider: "google-vision", cached: true });
+    }
+
+    // PDF üçün Vision documentTextDetection
+    const [result] = await visionClient.documentTextDetection({
+      image: { content: fileBuf },
+    });
+
+    const visionText = result?.fullTextAnnotation?.text || "";
+    const analysis = extractFromVisionText(visionText);
+
+    cacheSet(key, { analysis, provider: "google-vision" });
+
+    res.json({ analysis, provider: "google-vision", cached: false });
+  } catch (err) {
+    console.error("VISION ERROR:", err);
+    res.status(500).json({ error: "Google Vision xətası", details: String(err?.message || err) });
+  }
 });
+
+// -------------------- Start --------------------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Server running on port", PORT));
