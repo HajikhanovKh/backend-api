@@ -16,16 +16,16 @@ app.use(express.json({ limit: "10mb" }));
 // ================= Multer (RAM storage) =================
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }
+  limits: { fileSize: 25 * 1024 * 1024 },
 });
 
 // ================= Clients =================
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
 const visionClient = new vision.ImageAnnotatorClient({
-  credentials: JSON.parse(process.env.GCP_DOC_AI_KEY_JSON)
+  credentials: JSON.parse(process.env.GCP_DOC_AI_KEY_JSON),
 });
 
 // ================= Simple Cache =================
@@ -48,6 +48,29 @@ function cacheGet(key) {
 
 function cacheSet(key, value) {
   CACHE.set(key, { ...value, ts: Date.now() });
+}
+
+// ================= Safe JSON Parse (OpenAI codefence fix) =================
+function safeJsonParse(raw) {
+  const s = String(raw || "").trim();
+
+  // ```json ... ``` və ya ``` ... ``` fence-ləri təmizlə
+  const noFences = s
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  // İlk { və son } aralığını götür
+  const start = noFences.indexOf("{");
+  const end = noFences.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("JSON tapılmadı. Raw: " + noFences.slice(0, 300));
+  }
+
+  const jsonStr = noFences.slice(start, end + 1);
+
+  // Parse
+  return JSON.parse(jsonStr);
 }
 
 // ================= OpenAI ANALYSIS =================
@@ -79,29 +102,35 @@ Schema:
     "total_amount": string|null
   }
 }
+
+Return ONLY raw JSON. Do NOT wrap in \`\`\`json fences. Do NOT add any extra text.
 `;
 
   const response = await openai.responses.create({
     model: "gpt-4.1-mini",
-    input: [{
-      role: "user",
-      content: [
-        { type: "input_text", text: prompt },
-        {
-          type: "input_file",
-          filename: "document.pdf",
-          file_data: `data:application/pdf;base64,${base64}`
-        }
-      ]
-    }]
+    input: [
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: prompt },
+          {
+            type: "input_file",
+            filename: "document.pdf",
+            file_data: `data:application/pdf;base64,${base64}`,
+          },
+        ],
+      },
+    ],
   });
 
-  const text = response.output_text.trim();
+  const text = (response.output_text || "").trim();
 
   try {
-    return JSON.parse(text);
+    return safeJsonParse(text);
   } catch (e) {
-    throw new Error("OpenAI JSON parse error: " + text.slice(0, 500));
+    throw new Error(
+      "OpenAI JSON parse error: " + String(e.message).slice(0, 500)
+    );
   }
 }
 
@@ -119,7 +148,7 @@ function extractSimple(text) {
       gross_weight_kg: null,
       loading_place: null,
       delivery_place: null,
-      date: null
+      date: null,
     },
     invoice: {
       exporter: { name: null },
@@ -128,8 +157,8 @@ function extractSimple(text) {
       vin: vinMatch?.[0] || null,
       invoice_no: null,
       invoice_date: null,
-      total_amount: totalMatch?.[1] || null
-    }
+      total_amount: totalMatch?.[1] || null,
+    },
   };
 }
 
@@ -149,15 +178,13 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const key = "openai:" + sha256(req.file.buffer);
 
     const cached = cacheGet(key);
-    if (cached)
-      return res.json({ analysis: cached.analysis, cached: true });
+    if (cached) return res.json({ analysis: cached.analysis, cached: true });
 
     const analysis = await analyzeWithOpenAI(req.file.buffer);
 
     cacheSet(key, { analysis });
 
     res.json({ analysis, cached: false });
-
   } catch (err) {
     console.error("OPENAI ERROR:", err);
     res.status(500).json({ error: err.message });
@@ -173,11 +200,10 @@ app.post("/upload/google-vision", upload.single("file"), async (req, res) => {
     const key = "vision:" + sha256(req.file.buffer);
 
     const cached = cacheGet(key);
-    if (cached)
-      return res.json({ analysis: cached.analysis, cached: true });
+    if (cached) return res.json({ analysis: cached.analysis, cached: true });
 
     const [result] = await visionClient.documentTextDetection({
-      image: { content: req.file.buffer }
+      image: { content: req.file.buffer },
     });
 
     const text = result?.fullTextAnnotation?.text || "";
@@ -187,7 +213,6 @@ app.post("/upload/google-vision", upload.single("file"), async (req, res) => {
     cacheSet(key, { analysis });
 
     res.json({ analysis, cached: false });
-
   } catch (err) {
     console.error("VISION ERROR:", err);
     res.status(500).json({ error: err.message });
