@@ -5,6 +5,7 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import crypto from "crypto";
+import mysql from "mysql2/promise";
 
 import OpenAI from "openai";
 import { DocumentProcessorServiceClient } from "@google-cloud/documentai";
@@ -27,6 +28,18 @@ const openai = new OpenAI({
 // Document AI client (Railway env JSON ilə)
 const docaiClient = new DocumentProcessorServiceClient({
   credentials: JSON.parse(process.env.GCP_DOC_AI_KEY_JSON),
+});
+
+// ================= MySQL =================
+const db = mysql.createPool({
+  host: process.env.MYSQLHOST,
+  port: Number(process.env.MYSQLPORT || 3306),
+  user: process.env.MYSQLUSER,
+  password: process.env.MYSQLPASSWORD,
+  database: process.env.MYSQLDATABASE,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
 });
 
 // ================= Simple Cache =================
@@ -274,6 +287,30 @@ async function analyzeWithDocumentAI(pdfBuffer) {
 // Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, routes: ["/upload", "/upload/google-vision"] });
+});
+
+app.get("/nv/search", async (req, res) => {
+  const reg = String(req.query.reg_code || "").trim();
+  if (!reg) return res.status(400).json({ error: "reg_code required" });
+
+  try {
+    const [rows] = await db.execute(
+      `SELECT nv_number, nv_marka, nv_type, nv_country
+       FROM nv_info
+       WHERE TRIM(nv_reg_code) = TRIM(?)
+       LIMIT 1`,
+      [reg]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: "not_found" });
+    }
+
+    return res.json(rows[0]);
+  } catch (e) {
+    console.error("NV SEARCH ERROR:", e);
+    return res.status(500).json({ error: "server_error" });
+  }
 });
 
 // -------- OpenAI ----------
